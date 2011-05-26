@@ -16,6 +16,7 @@
 (add-to-list 'auto-mode-alist '("\\.esp\\'" . html-mode))
 (add-to-list 'auto-mode-alist '("\\.frag\\'" . html-mode))
 (add-to-list 'auto-mode-alist '("\\.vm\\'" . html-mode))
+(add-to-list 'auto-mode-alist '("\\.hbs\\'" . html-mode))
 
 (autoload 'ecmascript-mode "ecmascript-mode" "ECMA Mode." t)
 (add-to-list 'auto-mode-alist '("\\.as\\'" . ecmascript-mode))
@@ -31,10 +32,12 @@
 (add-to-list 'auto-mode-alist '("\\.php\\'" . php-mode))
 (add-to-list 'auto-mode-alist '("\\.tpl\\'" . php-mode))
 
+(require 'coffee-mode)
 (require 'mustache-mode)
-(add-to-list 'auto-mode-alist '("\\.hbs$" . tpl-mode))
 (require 'sws-mode)
+(require 'jade-mode)
 (add-to-list 'auto-mode-alist '("\\.styl$" . sws-mode))
+(add-to-list 'auto-mode-alist '("\\.jade$" . sws-mode))
 
 ;; ruby                                                                         
 ;; based on http://www.rubygarden.org/Ruby/page/show/InstallingEmacsExtensions  
