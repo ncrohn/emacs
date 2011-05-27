@@ -11,7 +11,7 @@
 (transient-mark-mode 1)
 (column-number-mode 1)
 
-(add-to-list 'load-path "~/.emacs.d/site-lisp")
+(add-to-list 'load-path "~/.emacs.d/vendor")
 
 (add-to-list 'auto-mode-alist '("\\.esp\\'" . html-mode))
 (add-to-list 'auto-mode-alist '("\\.frag\\'" . html-mode))
