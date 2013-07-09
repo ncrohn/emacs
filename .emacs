@@ -71,7 +71,7 @@
 
 ;; (require 'find-recursive)
 ;; load sml-mode setup code
-(load "~/.emacs.d/site-lisp/sml-mode/sml-mode-startup")
+(load "~/.emacs.d/vendor/sml-mode/sml-mode-startup")
 (custom-set-variables
   ;; custom-set-variables was added by Custom.
   ;; If you edit it by hand, you could mess it up, so be careful.
