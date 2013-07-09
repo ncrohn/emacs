@@ -21,9 +21,12 @@
 (autoload 'ecmascript-mode "ecmascript-mode" "ECMA Mode." t)
 (add-to-list 'auto-mode-alist '("\\.as\\'" . ecmascript-mode))
 
-(autoload 'js2-mode "js2" nil t)
+(autoload 'js2-mode "js2-mode" nil t)
 (add-to-list 'auto-mode-alist '("\\.js$" . js2-mode))
 ;; (add-to-list 'auto-mode-alist '("\\.js\\'" . ecmascript-mode))
+
+(autoload 'json-mode "json-mode" "JSON Mode." nil t)
+(add-to-list 'auto-mode-alist '("\\.json\\'" . json-mode))
 
 (autoload 'css-mode "css-mode" "CSS Mode." t)
 (add-to-list 'auto-mode-alist '("\\.css\\'" . css-mode))
@@ -37,7 +40,7 @@
 (require 'sws-mode)
 (require 'jade-mode)
 (add-to-list 'auto-mode-alist '("\\.styl$" . sws-mode))
-(add-to-list 'auto-mode-alist '("\\.jade$" . sws-mode))
+(add-to-list 'auto-mode-alist '("\\.jade$" . jade-mode))
 
 ;; ruby                                                                         
 ;; based on http://www.rubygarden.org/Ruby/page/show/InstallingEmacsExtensions  
@@ -71,18 +74,19 @@
 
 ;; (require 'find-recursive)
 ;; load sml-mode setup code
-(load "~/.emacs.d/site-lisp/sml-mode/sml-mode-startup")
+(load "~/.emacs.d/vendor/sml-mode/sml-mode-startup")
 (custom-set-variables
   ;; custom-set-variables was added by Custom.
   ;; If you edit it by hand, you could mess it up, so be careful.
   ;; Your init file should contain only one such instance.
   ;; If there is more than one, they won't work right.
+ '(gud-gdb-command-name "gdb --annotate=1")
  '(initial-buffer-choice t)
- '(js2-allow-keywords-as-property-names nil)
- '(js2-bounce-indent-p t)
+ '(js2-pretty-multiline-declarations t)
+ '(js2-allow-keywords-as-property-names t)
  '(js2-cleanup-whitespace t)
  '(js2-enter-indents-newline t)
- '(js2-indent-on-enter-key t))
+ '(large-file-warning-threshold nil))
 (custom-set-faces
   ;; custom-set-faces was added by Custom.
   ;; If you edit it by hand, you could mess it up, so be careful.
