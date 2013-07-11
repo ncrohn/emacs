@@ -1,475 +1,481 @@
-;;; css-mode.el
+;;; css-mode.el --- Major mode to edit CSS files
 
-;; css-mode.el             -*- Emacs-Lisp -*-
+;; Copyright (C) 2006, 2007, 2008, 2009  Free Software Foundation, Inc.
 
-;; Mode for editing Cascading Style Sheets
+;; Author: Stefan Monnier <monnier@iro.umontreal.ca>
+;; Keywords: hypermedia
 
-;; Created:    <Sat Feb 12 13:51:49 EST 2000>
-;; Time-stamp: <2002-11-25 10:21:39 foof>
-;; Author:     Alex Shinn <foof@synthcode.com>
-;; Version:    0.3
-;; Keywords:   html, style sheets, languages
+;; This file is part of GNU Emacs.
 
-;; Copyright (C) 2000-2002 Alex Shinn
+;; GNU Emacs is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
 
-;; This program is free software; you can redistribute it and/or
-;; modify it under the terms of the GNU General Public License as
-;; published by the Free Software Foundation; either version 2 of
-;; the License, or (at your option) any later version.
-;; 
-;; This program is distributed in the hope that it will be useful,
+;; GNU Emacs is distributed in the hope that it will be useful,
 ;; but WITHOUT ANY WARRANTY; without even the implied warranty of
 ;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ;; GNU General Public License for more details.
-;; 
-;; You should have received a copy of the GNU General Public
-;; License along with this program; if not, write to the Free
-;; Software Foundation, Inc., 59 Temple Place, Suite 330, Boston,
-;; MA 02111-1307 USA
+
+;; You should have received a copy of the GNU General Public License
+;; along with GNU Emacs.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
-;;
-;; This file provides a major mode for editing level 1 and 2 Cascading
-;; Style Sheets.  It offers syntax highlighting, indentation, and
-;; auto-completion of various CSS elements.
-;;
-;; To use it, put the following in your .emacs:
-;;
-;; (autoload 'css-mode "css-mode" "Mode for editing CSS files" t)
-;;
-;; You may also want something like:
-;;
-;; (setq auto-mode-alist
-;;       (append '(("\\.css$" . css-mode))
-;;               auto-mode-alist))
-;;
 
-;;; ChangeLog:
-;;
-;; 2002/11/25 (version 0.3):
-;;   * changed to use indent-to to obey tab preference (Vasily Korytov)
+;; Yet another CSS mode.
 
+;;; Todo:
+
+;; - electric ; and }
+;; - filling code with auto-fill-mode
+;; - completion
+;; - fix font-lock errors with multi-line selectors
+
+;;; Code:
 
 (defgroup css nil
-  "Customizations for editing Cascading Style Sheets"
+  "Cascading Style Sheets (CSS) editing mode."
   :group 'languages)
 
-(defcustom css-mode-hook nil
-  "*Hook to be run when `css-mode' is entered."
-  :group 'css
-  :type  'hook)
+(eval-when-compile (require 'cl))
 
-(defcustom css-electric-semi-behavior nil
-  "If non-nil semicolons are electric in css mode"
-  :group 'css
-  :type  'boolean)
+(defun css-extract-keyword-list (res)
+  (with-temp-buffer
+    (url-insert-file-contents "http://www.w3.org/TR/REC-CSS2/css2.txt")
+    (goto-char (point-max))
+    (search-backward "Appendix H. Index")
+    (forward-line)
+    (delete-region (point-min) (point))
+    (let ((result nil)
+          keys)
+      (dolist (re res)
+        (goto-char (point-min))
+        (setq keys nil)
+        (while (re-search-forward (cdr re) nil t)
+          (push (match-string 1) keys))
+        (push (cons (car re) (sort keys 'string-lessp)) result))
+      (nreverse result))))
 
-(defcustom css-electric-brace-behavior nil
-  "If non-nil braces are electric in css mode"
-  :group 'css
-  :type  'boolean)
+(defun css-extract-parse-val-grammar (string env)
+  (let ((start 0)
+        (elems ())
+        name)
+    (while (string-match
+            (concat "\\(?:"
+                    (concat "<a [^>]+><span [^>]+>\\(?:"
+                            "&lt;\\([^&]+\\)&gt;\\|'\\([^']+\\)'"
+                            "\\)</span></a>")
+                    "\\|" "\\(\\[\\)"
+                    "\\|" "\\(]\\)"
+                    "\\|" "\\(||\\)"
+                    "\\|" "\\(|\\)"
+                    "\\|" "\\([*+?]\\)"
+                    "\\|" "\\({[^}]+}\\)"
+                    "\\|" "\\(\\w+\\(?:-\\w+\\)*\\)"
+                    "\\)[ \t\n]*")
+            string start)
+      ;; (assert (eq start (match-beginning 0)))
+      (setq start (match-end 0))
+      (cond
+       ;; Reference to a type of value.
+       ((setq name (match-string-no-properties 1 string))
+        (push (intern name) elems))
+       ;; Reference to another property's values.
+       ((setq name (match-string-no-properties 2 string))
+        (setq elems (delete-dups (append (cdr (assoc name env)) elems))))
+       ;; A literal
+       ((setq name (match-string-no-properties 9 string))
+        (push name elems))
+       ;; We just ignore the rest.  I.e. we ignore the structure because
+       ;; it's too difficult to exploit anyway (it would allow us to only
+       ;; complete top/center/bottom after one of left/center/right and
+       ;; vice-versa).
+       (t nil)))
+    elems))
+
+
+(defun css-extract-props-and-vals ()
+  (with-temp-buffer
+    (url-insert-file-contents "http://www.w3.org/TR/CSS21/propidx.html")
+    (goto-char (point-min))
+    (let ((props ()))
+      (while (re-search-forward "#propdef-\\([^\"]+\\)\"><span class=\"propinst-\\1 xref\">'\\1'</span></a>" nil t)
+        (let ((prop (match-string-no-properties 1)))
+          (save-excursion
+            (goto-char (match-end 0))
+            (search-forward "<td>")
+            (let ((vals-string (buffer-substring (point)
+                                                 (progn
+                                                   (re-search-forward "[ \t\n]+|[ \t\n]+<a href=\"cascade.html#value-def-inherit\" class=\"noxref\"><span class=\"value-inst-inherit\">inherit</span></a>")
+                                                   (match-beginning 0)))))
+              ;;
+              (push (cons prop (css-extract-parse-val-grammar vals-string props))
+                    props)))))
+      props)))
+
+;; Extraction was done with:
+;; (css-extract-keyword-list
+;;  '((pseudo . "^ +\\* :\\([^ \n,]+\\)")
+;;    (at . "^ +\\* @\\([^ \n,]+\\)")
+;;    (descriptor . "^ +\\* '\\([^ '\n]+\\)' (descriptor)")
+;;    (media . "^ +\\* '\\([^ '\n]+\\)' media group")
+;;    (property . "^ +\\* '\\([^ '\n]+\\)',")))
+
+(defconst css-pseudo-ids
+  '("active" "after" "before" "first" "first-child" "first-letter" "first-line"
+    "focus" "hover" "lang" "left" "link" "right" "visited")
+  "Identifiers for pseudo-elements and pseudo-classes.")
+
+(defconst css-at-ids
+  '("charset" "font-face" "import" "media" "page")
+  "Identifiers that appear in the form @foo.")
+
+(defconst css-descriptor-ids
+  '("ascent" "baseline" "bbox" "cap-height" "centerline" "definition-src"
+    "descent" "font-family" "font-size" "font-stretch" "font-style"
+    "font-variant" "font-weight" "mathline" "panose-1" "slope" "src" "stemh"
+    "stemv" "topline" "unicode-range" "units-per-em" "widths" "x-height")
+  "Identifiers for font descriptors.")
+
+(defconst css-media-ids
+  '("all" "aural" "bitmap" "continuous" "grid" "paged" "static" "tactile"
+    "visual")
+  "Identifiers for types of media.")
+
+(defconst css-property-ids
+  '("azimuth" "background" "background-attachment" "background-color"
+    "background-image" "background-position" "background-repeat" "block"
+    "border" "border-bottom" "border-bottom-color" "border-bottom-style"
+    "border-bottom-width" "border-collapse" "border-color" "border-left"
+    "border-left-color" "border-left-style" "border-left-width" "border-right"
+    "border-right-color" "border-right-style" "border-right-width"
+    "border-spacing" "border-style" "border-top" "border-top-color"
+    "border-top-style" "border-top-width" "border-width" "bottom"
+    "caption-side" "clear" "clip" "color" "compact" "content"
+    "counter-increment" "counter-reset" "cue" "cue-after" "cue-before"
+    "cursor" "dashed" "direction" "display" "dotted" "double" "elevation"
+    "empty-cells" "float" "font" "font-family" "font-size" "font-size-adjust"
+    "font-stretch" "font-style" "font-variant" "font-weight" "groove" "height"
+    "hidden" "inline" "inline-table" "inset" "left" "letter-spacing"
+    "line-height" "list-item" "list-style" "list-style-image"
+    "list-style-position" "list-style-type" "margin" "margin-bottom"
+    "margin-left" "margin-right" "margin-top" "marker-offset" "marks"
+    "max-height" "max-width" "min-height" "min-width" "orphans" "outline"
+    "outline-color" "outline-style" "outline-width" "outset" "overflow"
+    "padding" "padding-bottom" "padding-left" "padding-right" "padding-top"
+    "page" "page-break-after" "page-break-before" "page-break-inside" "pause"
+    "pause-after" "pause-before" "pitch" "pitch-range" "play-during" "position"
+    "quotes" "richness" "ridge" "right" "run-in" "size" "solid" "speak"
+    "speak-header" "speak-numeral" "speak-punctuation" "speech-rate" "stress"
+    "table" "table-caption" "table-cell" "table-column" "table-column-group"
+    "table-footer-group" "table-header-group" "table-layout" "table-row"
+    "table-row-group" "text-align" "text-decoration" "text-indent"
+    "text-shadow" "text-transform" "top" "unicode-bidi" "vertical-align"
+    "visibility" "voice-family" "volume" "white-space" "widows" "width"
+    "word-spacing" "z-index")
+  "Identifiers for properties.")
+
+(defcustom css-electric-keys '(?\} ?\;) ;; '()
+  "Self inserting keys which should trigger re-indentation."
+  :version "22.2"
+  :type '(repeat character)
+  :options '((?\} ?\;))
+  :group 'css)
+
+(defvar css-mode-syntax-table
+  (let ((st (make-syntax-table)))
+    ;; C-style comments.
+    (modify-syntax-entry ?/ ". 14" st)
+    (modify-syntax-entry ?* ". 23" st)
+    ;; Strings.
+    (modify-syntax-entry ?\" "\"" st)
+    (modify-syntax-entry ?\' "\"" st)
+    ;; Blocks.
+    (modify-syntax-entry ?\{ "(}" st)
+    (modify-syntax-entry ?\} "){" st)
+    ;; Args in url(...) thingies and other "function calls".
+    (modify-syntax-entry ?\( "()" st)
+    (modify-syntax-entry ?\) ")(" st)
+    ;; To match attributes in selectors.
+    (modify-syntax-entry ?\[ "(]" st)
+    (modify-syntax-entry ?\] ")[" st)
+    ;; Special chars that sometimes come at the beginning of words.
+    (modify-syntax-entry ?@ "'" st)
+    ;; (modify-syntax-entry ?: "'" st)
+    (modify-syntax-entry ?# "'" st)
+    ;; Distinction between words and symbols.
+    (modify-syntax-entry ?- "_" st)
+    st))
+
+(defconst css-escapes-re
+  "\\\\\\(?:[^\000-\037\177]\\|[0-9a-fA-F]+[ \n\t\r\f]?\\)")
+(defconst css-nmchar-re (concat "\\(?:[-[:alnum:]]\\|" css-escapes-re "\\)"))
+(defconst css-nmstart-re (concat "\\(?:[[:alpha:]]\\|" css-escapes-re "\\)"))
+(defconst css-ident-re (concat css-nmstart-re css-nmchar-re "*"))
+(defconst css-name-re (concat css-nmchar-re "+"))
+
+(defface css-selector '((t :inherit font-lock-function-name-face))
+  "Face to use for selectors."
+  :group 'css)
+(defface css-property '((t :inherit font-lock-variable-name-face))
+  "Face to use for properties."
+  :group 'css)
+
+(defvar css-font-lock-keywords
+  `(("!\\s-*important" . font-lock-builtin-face)
+    ;; Atrules keywords.  IDs not in css-at-ids are valid (ignored).
+    ;; In fact the regexp should probably be
+    ;; (,(concat "\\(@" css-ident-re "\\)\\([ \t\n][^;{]*\\)[;{]")
+    ;;  (1 font-lock-builtin-face))
+    ;; Since "An at-rule consists of everything up to and including the next
+    ;; semicolon (;) or the next block, whichever comes first."
+    (,(concat "@" css-ident-re) . font-lock-builtin-face)
+    ;; Selectors.
+    ;; FIXME: attribute selectors don't work well because they may contain
+    ;; strings which have already been highlighted as f-l-string-face and
+    ;; thus prevent this highlighting from being applied (actually now that
+    ;; I use `append' this should work better).  But really the part of hte
+    ;; selector between [...] should simply not be highlighted.
+    (,(concat "^\\([ \t]*[^@:{\n][^:{\n]+\\(?::" (regexp-opt css-pseudo-ids t)
+              "\\(?:([^)]+)\\)?[^:{\n]*\\)*\\)\\(?:\n[ \t]*\\)*{")
+     (1 'css-selector append))
+    ;; In the above rule, we allow the open-brace to be on some subsequent
+    ;; line.  This will only work if we properly mark the intervening text
+    ;; as being part of a multiline element (and even then, this only
+    ;; ensures proper refontification, but not proper discovery).
+    ("^[ \t]*{" (0 (save-excursion
+                     (goto-char (match-beginning 0))
+                     (skip-chars-backward " \n\t")
+                     (put-text-property (point) (match-end 0)
+                                        'font-lock-multiline t)
+                     ;; No face.
+                     nil)))
+    ;; Properties.  Again, we don't limit ourselves to css-property-ids.
+    (,(concat "\\(?:[{;]\\|^\\)[ \t]*\\(" css-ident-re "\\)\\s-*:")
+     (1 'css-property))))
+
+(defvar css-font-lock-defaults
+  '(css-font-lock-keywords nil t))
+
+;;;###autoload (add-to-list 'auto-mode-alist '("\\.css\\'" . css-mode))
+;;;###autoload
+(define-derived-mode css-mode fundamental-mode "CSS"
+  "Major mode to edit Cascading Style Sheets."
+  (set (make-local-variable 'font-lock-defaults) css-font-lock-defaults)
+  (set (make-local-variable 'comment-start) "/*")
+  (set (make-local-variable 'comment-start-skip) "/\\*+[ \t]*")
+  (set (make-local-variable 'comment-end) "*/")
+  (set (make-local-variable 'comment-end-skip) "[ \t]*\\*+/")
+  (set (make-local-variable 'forward-sexp-function) 'css-forward-sexp)
+  (set (make-local-variable 'parse-sexp-ignore-comments) t)
+  (set (make-local-variable 'indent-line-function) 'css-indent-line)
+  (set (make-local-variable 'fill-paragraph-function)
+       'css-fill-paragraph)
+  (when css-electric-keys
+    (let ((fc (make-char-table 'auto-fill-chars)))
+      (set-char-table-parent fc auto-fill-chars)
+      (dolist (c css-electric-keys)
+        (aset fc c 'indent-according-to-mode))
+      (set (make-local-variable 'auto-fill-chars) fc))))
+
+(defvar comment-continue)
+
+(defun css-fill-paragraph (&optional justify)
+  (save-excursion
+    (let ((ppss (syntax-ppss))
+          (eol (line-end-position)))
+      (cond
+       ((and (nth 4 ppss)
+             (save-excursion
+               (goto-char (nth 8 ppss))
+               (forward-comment 1)
+               (prog1 (not (bolp))
+                 (setq eol (point)))))
+        ;; Filling inside a comment whose comment-end marker is not \n.
+        ;; This code is meant to be generic, so that it works not only for
+        ;; css-mode but for all modes.
+        (save-restriction
+          (narrow-to-region (nth 8 ppss) eol)
+          (comment-normalize-vars)      ;Will define comment-continue.
+          (let ((fill-paragraph-function nil)
+                (paragraph-separate
+                 (if (and comment-continue
+                          (string-match "[^ \t]" comment-continue))
+                     (concat "\\(?:[ \t]*" (regexp-quote comment-continue)
+                             "\\)?\\(?:" paragraph-separate "\\)")
+                   paragraph-separate))
+                (paragraph-start
+                 (if (and comment-continue
+                          (string-match "[^ \t]" comment-continue))
+                     (concat "\\(?:[ \t]*" (regexp-quote comment-continue)
+                             "\\)?\\(?:" paragraph-start "\\)")
+                   paragraph-start)))
+            (fill-paragraph justify)
+            ;; Don't try filling again.
+            t)))
+
+       ((and (null (nth 8 ppss))
+             (or (nth 1 ppss)
+                 (and (ignore-errors
+                        (down-list 1)
+                        (when (<= (point) eol)
+                          (setq ppss (syntax-ppss)))))))
+        (goto-char (nth 1 ppss))
+        (let ((end (save-excursion
+                     (ignore-errors (forward-sexp 1) (copy-marker (point) t)))))
+          (when end
+            (while (re-search-forward "[{;}]" end t)
+              (cond
+               ;; This is a false positive inside a string or comment.
+               ((nth 8 (syntax-ppss)) nil)
+               ((eq (char-before) ?\})
+                (save-excursion
+                  (forward-char -1)
+                  (skip-chars-backward " \t")
+                  (unless (bolp) (newline))))
+               (t
+                (while
+                    (progn
+                      (setq eol (line-end-position))
+                      (and (forward-comment 1)
+                           (> (point) eol)
+                           ;; A multi-line comment should be on its own line.
+                           (save-excursion (forward-comment -1)
+                                           (when (< (point) eol)
+                                             (newline)
+                                             t)))))
+                (if (< (point) eol) (newline)))))
+            (goto-char (nth 1 ppss))
+            (indent-region (line-beginning-position 2) end)
+            ;; Don't use the default filling code.
+            t)))))))
+
+;;; Navigation and indentation.
+
+(defconst css-navigation-syntax-table
+  (let ((st (make-syntax-table css-mode-syntax-table)))
+    (map-char-table (lambda (c v)
+                      ;; Turn punctuation (code = 1) into symbol (code = 1).
+                      (if (eq (car-safe v) 1)
+                          (set-char-table-range st c (cons 3 (cdr v)))))
+                    st)
+    st))
+
+(defun css-backward-sexp (n)
+  (let ((forward-sexp-function nil))
+    (if (< n 0) (css-forward-sexp (- n))
+      (while (> n 0)
+        (setq n (1- n))
+        (forward-comment (- (point-max)))
+        (if (not (eq (char-before) ?\;))
+            (backward-sexp 1)
+          (while (progn (backward-sexp 1)
+                        (save-excursion
+                          (forward-comment (- (point-max)))
+                          ;; FIXME: We should also skip punctuation.
+                          (not (or (bobp) (memq (char-before) '(?\; ?\{))))))))))))
+
+(defun css-forward-sexp (n)
+  (let ((forward-sexp-function nil))
+    (if (< n 0) (css-backward-sexp (- n))
+      (while (> n 0)
+        (setq n (1- n))
+        (forward-comment (point-max))
+        (if (not (eq (char-after) ?\;))
+            (forward-sexp 1)
+          (while (progn (forward-sexp 1)
+                        (save-excursion
+                          (forward-comment (point-max))
+                          ;; FIXME: We should also skip punctuation.
+                          (not (memq (char-after) '(?\; ?\})))))))))))
+
+(defun css-indent-calculate-virtual ()
+  (if (or (save-excursion (skip-chars-backward " \t") (bolp))
+          (if (looking-at "\\s(")
+              (save-excursion
+                (forward-char 1) (skip-chars-forward " \t")
+                (not (or (eolp) (looking-at comment-start-skip))))))
+      (current-column)
+    (css-indent-calculate)))
 
 (defcustom css-indent-offset 4
-  "Number of spaces to indent lines in CSS mode"
-  :group 'css
-  :type  'integer)
+  "Basic size of one indentation step."
+  :version "22.2"
+  :type 'integer
+  :group 'css)
 
-(defcustom css-tab-mode 'auto
-  "Behavior of tab in CSS mode"
-  :group 'css
-  :type  '(choice (const :tag "Always insert" insert)
-                  (const :tag "Always indent" indent)
-                  (const :tag "Always complete" complete)
-                  (const :tag "Auto" auto) ))
-
-(defvar css-mode-abbrev-table nil
-  "Abbreviation table used in `css-mode' buffers.")
-(define-abbrev-table 'css-mode-abbrev-table ())
-
-
-(defvar css-at-rule-keywords nil
-  "Keywords for CSS at rules" )
-(if css-at-rule-keywords nil
-  (setq css-at-rule-keywords
-        '("import" "media" "page" "font-face" "charset") ))
-
-(defvar css-at-rule-table nil
-  "Table for CSS at rules" )
-(if css-at-rule-table nil
-  (setq css-at-rule-table (make-vector 5 0))
-  (mapcar (lambda (x) (intern x css-at-rule-table))
-          css-at-rule-keywords ))
-
-(defvar css-element-keywords nil
-  "Common CSS elements" )
-(if css-element-keywords nil
-  (setq css-element-keywords 
-        '("A" "ADDRESS" "B" "BLOCKQUOTE" "BODY" "BR" "CITE"
-          "CODE" "DIR" "DIV" "DD" "DL" "DT" "EM" "FORM" "H1"
-          "H2" "H3" "H4" "H5" "H6" "HR" "I" "IMG" "KBD" "LI"
-          "MENU" "OL" "P" "PRE" "SAMP" "SPAN" "STRONG" "TABLE"
-          "TR" "TH" "TD" "TT" "UL" "VAR" )))
-
-(defvar css-element-table nil
-  "Table for CSS elements" )
-(if css-element-table nil
-  (setq css-element-table (make-vector 5 0))
-  (mapcar (lambda (x) (intern x css-element-table))
-          css-element-keywords ))
-
-
-(defvar css-property-keywords nil "CSS properties" )
-(if css-property-keywords nil
-  (setq css-property-keywords
-'("azimuth" "background" "background-attachment" "background-color"
-  "background-image" "background-position" "background-repeat" "border"
-  "border-collapse" "border-color" "border-spacing" "border-style"
-  "border-top" "border-right" "border-bottom" "border-left"
-  "border-top-color" "border-right-color" "border-bottom-color"
-  "border-left-color" "border-top-style" "border-right-style"
-  "border-bottom-style" "border-left-style" "border-top-width"
-  "border-right-width" "border-bottom-width" "border-left-width"
-  "border-width" "bottom" "caption-side" "clear" "clip" "color"
-  "content" "counter-increment" "counter-reset" "cue" "cue-after"
-  "cue-before" "cursor" "direction" "display" "elevation" "empty-cells"
-  "float" "font" "font-family" "font-size" "font-size-adjust"
-  "font-stretch" "font-style" "font-variant" "font-weight" "height"
-  "left" "letter-spacing" "line-height" "list-style" "list-style-image"
-  "list-style-position" "list-style-type" "margin" "margin-top"
-  "margin-right" "margin-bottom" "margin-left" "marker-offset" "marks"
-  "max-height" "max-width" "min-height" "min-width" "orphans" "outline"
-  "outline-color" "outline-style" "outline-width" "overflow" "padding"
-  "padding-top" "padding-right" "padding-bottom" "padding-left" "page"
-  "page-break-after" "page-break-before" "page-break-inside" "pause"
-  "pause-after" "pause-before" "pitch" "pitch-range" "play-during"
-  "position" "quotes" "richness" "right" "size" "speak" "speak-header"
-  "speak-numeral" "speak-punctuation" "speech-rate" "stress"
-  "table-layout" "text-align" "text-decoration" "text-indent"
-  "text-shadow" "text-transform" "top" "unicode-bidi" "vertical-align"
-  "visibility" "voice-family" "volume" "white-space" "widows" "width"
-  "word-spacing" "z-index" )))
-
-(defvar css-property-table nil
-  "Table for CSS properties" )
-(if css-property-table nil
-  (setq css-property-table (make-vector 5 0))
-  (mapcar (lambda (x) (intern x css-property-table))
-          css-property-keywords ))
-
-
-;; Three levels of highlighting
-
-(defconst css-font-lock-keywords-1 nil
-  "Subdued level highlighting for C modes.")
-
-(defconst css-font-lock-keywords-2 nil
-  "Medium level highlighting for C modes.")
-
-(defconst css-font-lock-keywords-3 nil
-  "Gaudy level highlighting for C modes.")
-
-(defvar css-font-keywords nil
-  "Font lock keywords for `css-mode'." )
-
-(let* ((css-keywords  "\\(url\\|![ \t]*important\\)")
-       (css-nmstart   "[a-zA-Z]")
-       (css-nmchar    "[a-zA-Z0-9-]")
-       (css-ident     (concat css-nmstart css-nmchar "*"))
-       (css-at-rule   (concat "\\(@" css-ident "\\)"))
-       (css-element-s (concat "^\\(" css-ident "\\)"))
-       (css-element (concat "\\(?:[,+>][ \t]*\\)\\(" css-ident "\\)"))
-       (css-class  (concat css-element "?\\.\\(" css-ident "\\)"))
-       (css-pseudo (concat ":\\(" css-ident "\\)"))
-       (css-attr (concat "\\[\\(" css-ident "\\)\\]"))
-       (css-id (concat "#\\(" css-ident "\\)"))
-       (css-declaration (concat "[ \t][ \t]*\\(\\<" css-ident "\\>\\):")) )
-  (setq css-font-lock-keywords-1
-   (list
-    (list css-keywords    1 'font-lock-keyword-face)
-    (list css-at-rule     1 'font-lock-keyword-face)
-    (list css-element-s   1 'font-lock-function-name-face)
-    (list css-element     1 'font-lock-function-name-face)
-    (list css-class       2 'font-lock-type-face)
-    (list css-pseudo      1 'font-lock-constant-face)
-    (list css-attr        1 'font-lock-variable-name-face)
-    (list css-id          1 'font-lock-string-face)
-    (list css-declaration 1 'font-lock-variable-name-face) ))
-  (setq css-font-lock-keywords-2 css-font-lock-keywords-1)
-  (setq css-font-lock-keywords-3 css-font-lock-keywords-2) )
-
-(defvar css-mode-syntax-table nil
-  "Syntax table used in `css-mode' buffers.")
-
-(if css-mode-syntax-table nil
-  (setq css-mode-syntax-table (make-syntax-table))
-  (modify-syntax-entry ?+  "."    css-mode-syntax-table)
-  (modify-syntax-entry ?=  "."    css-mode-syntax-table)
-  (modify-syntax-entry ?<  "."    css-mode-syntax-table)
-  (modify-syntax-entry ?>  "."    css-mode-syntax-table)
-  (modify-syntax-entry ?-  "w"    css-mode-syntax-table)
-  (modify-syntax-entry ?/  "w"    css-mode-syntax-table)
-  (modify-syntax-entry ?.  "w"    css-mode-syntax-table)
-  (modify-syntax-entry ?\' "\""   css-mode-syntax-table)
-  (cond
-   ;; XEmacs 19 & 20
-   ((memq '8-bit c-emacs-features)
-    (modify-syntax-entry ?/  ". 1456" css-mode-syntax-table)
-    (modify-syntax-entry ?*  ". 23"   css-mode-syntax-table))
-   ;; Emacs 19 & 20
-   ((memq '1-bit c-emacs-features)
-    (modify-syntax-entry ?/  ". 124b" css-mode-syntax-table)
-    (modify-syntax-entry ?*  ". 23"   css-mode-syntax-table))
-   ;; incompatible
-   (t (error "CSS Mode is incompatible with this version of Emacs")) )
-  (modify-syntax-entry ?\n "> b"  css-mode-syntax-table)
-  ;; Give CR the same syntax as newline, for selective-display
-  (modify-syntax-entry ?\^m "> b" css-mode-syntax-table) )
-
-
-(defvar css-mode-map nil
-  "Keymap used in `css-mode' buffers.")
-
-(if css-mode-map nil
-  (setq css-mode-map (make-sparse-keymap))
-  (define-key css-mode-map ";"        'css-electric-semicolon)
-  (define-key css-mode-map "{"        'css-electric-brace)
-  (define-key css-mode-map "}"        'css-electric-brace)
-  (define-key css-mode-map "\t"       'css-tab-function)
-  (define-key css-mode-map "\C-c\C-c" 'css-comment-region)
-  (define-key css-mode-map "\C-c\C-a" 'css-complete-at-keyword)
-  (define-key css-mode-map "\C-c\C-e" 'css-complete-element)
-  (define-key css-mode-map "\C-c\C-p" 'css-complete-property) )
-
-
-;;; Utility functions
-
-(defun css-in-comment-p ()
-  "Check whether we are currently in a comment"
-  (let ((here (point)))
-    (and (search-backward "/*" nil t)
-         (prog1
-             (not (search-forward "*/" here t))
-           (goto-char here) ))))
-
-
-(defun css-complete-symbol (&optional table predicate prettify)
-  (let* ((end (point))
-	 (beg (save-excursion
-		(skip-syntax-backward "w")
-		(point)))
-	 (pattern (buffer-substring beg end))
-	 (table (or table obarray))
-	 (completion (try-completion pattern table predicate)))
-    (cond ((eq completion t))
-	  ((null completion)
-	   (error "Can't find completion for \"%s\"" pattern))
-	  ((not (string-equal pattern completion))
-	   (delete-region beg end)
-	   (insert completion))
-	  (t
-	   (message "Making completion list...")
-	   (let ((list (all-completions pattern table predicate)))
-	     (if prettify
-		 (setq list (funcall prettify list)))
-	     (with-output-to-temp-buffer "*Help*"
-	       (display-completion-list list)))
-	   (message "Making completion list...%s" "done")))))
+(defun css-indent-calculate ()
+  (let ((ppss (syntax-ppss))
+        pos)
+    (with-syntax-table css-navigation-syntax-table
+      (save-excursion
+        (cond
+         ;; Inside a string.
+         ((nth 3 ppss) 'noindent)
+         ;; Inside a comment.
+         ((nth 4 ppss)
+          (setq pos (point))
+          (forward-line -1)
+          (skip-chars-forward " \t")
+          (if (>= (nth 8 ppss) (point))
+              (progn
+                (goto-char (nth 8 ppss))
+                (if (eq (char-after pos) ?*)
+                    (forward-char 1)
+                  (if (not (looking-at comment-start-skip))
+                      (error "Internal css-mode error")
+                    (goto-char (match-end 0))))
+                (current-column))
+            (if (and (eq (char-after pos) ?*) (eq (char-after) ?*))
+                (current-column)
+              ;; 'noindent
+              (current-column)
+              )))
+         ;; In normal code.
+         (t
+          (or
+           (when (looking-at "\\s)")
+             (forward-char 1)
+             (backward-sexp 1)
+             (css-indent-calculate-virtual))
+           (when (looking-at comment-start-skip)
+             (forward-comment (point-max))
+             (css-indent-calculate))
+           (when (save-excursion (forward-comment (- (point-max)))
+                                 (setq pos (point))
+                                 (eq (char-syntax (preceding-char)) ?\())
+             (goto-char (1- pos))
+             (if (not (looking-at "\\s([ \t]*"))
+                 (error "Internal css-mode error")
+               (if (or (memq (char-after (match-end 0)) '(?\n nil))
+                       (save-excursion (goto-char (match-end 0))
+                                       (looking-at comment-start-skip)))
+                   (+ (css-indent-calculate-virtual) css-indent-offset)
+                 (progn (goto-char (match-end 0)) (current-column)))))
+           (progn
+             (css-backward-sexp 1)
+             (if (looking-at "\\s(")
+                 (css-indent-calculate)
+               (css-indent-calculate-virtual))))))))))
 
 
 (defun css-indent-line ()
-  "Indent the current line"
-  (if (or (css-in-comment-p)
-          (looking-at "[ \t]*/\\*") )
-      nil
-    (save-excursion
-      (let ((here (point))
-            (depth 0))
-        (while (and (forward-line -1)
-                    (or (looking-at "^[ \t]*$")
-                        (css-in-comment-p) ))
-          ; Jump to a non comment/white-space line
-          )
-        (cond ((looking-at "\\([ \t]*\\)\\([^ \t].*\\)?{[ \t]*$")
-               (setq depth (+ (- (match-end 1) (match-beginning 1))
-                              css-indent-offset )))
-              ((looking-at "\\([ \t]*\\)[^ \t]")
-               (setq depth (- (match-end 1) (match-beginning 1))) )
-              (t (setq depth 0)) )
-        (goto-char here)
-        (beginning-of-line)
-        (if (looking-at "[ \t]*}")
-            (setq depth (max (- depth css-indent-offset) 0)) )
-        (if (looking-at "\\([ \t]*\\)")
-            (if (= depth (- (match-end 1) (match-beginning 1)))
-                nil
-              (delete-region (match-beginning 1) (match-end 1))
-              (indent-to depth))
-          (if (> depth 0)
-              (indent-to depth)))))
-    (if (looking-at "[ \t]*")
-        (end-of-line) )))
-
-
-(defun css-indent-region (start end)
-  "Indent the current line"
-  (save-excursion
-    (save-restriction
-      (narrow-to-region start end)
-      (goto-char start)
-      (while (and (not (eobp)) (forward-line 1))
-        (css-indent-line) ))))
-
-
-;;; Commands
-
-(defun css-electric-semicolon (arg)
-  "Insert a semi-colon, and possibly indent line.
-If numeric argument is not given, or is 1, auto-indent according to
-`css-electric-semi-behavior'.  If arg is 0, do not auto-indent, if
-arg is 2 always auto-indent, and if arg is anything else invert the
-usual behavior."
-  (interactive "P")
-  ;; insert a semicolon
-  (self-insert-command 1)
-  ;; maybe do electric behavior
-  (or (css-in-comment-p)
-      (and (eq arg 1)
-           css-electric-semi-behavior
-           (css-indent-line) )
-      (and (eq arg 2)
-           (css-indent-line) )
-      (eq arg 0)
-      (or (not css-electric-semi-behavior)
-          (css-indent-line) )))
-
-
-(defun css-electric-brace (arg)
-  "Insert a brace, and possibly indent line.
-If numeric argument is not given, or is 1, auto-indent according to
-`css-electric-brace-behavior'.  If arg is 0, do not auto-indent, if
-arg is 2 always auto-indent, and if arg is anything else invert the
-usual behavior."
-  (interactive "P")
-  ;; insert a brace
-  (self-insert-command 1)
-  ;; maybe do electric behavior
-  (or (css-in-comment-p)
-      (and (eq arg 1)
-           css-electric-brace-behavior
-           (css-indent-line) )
-      (and (eq arg 2)
-           (css-indent-line) )
-      (eq arg 0)
-      (or (not css-electric-brace-behavior)
-          (css-indent-line) )))
-
-(defun css-complete-at-keyword ()
-  "Complete the standard element at point"
+  "Indent current line according to CSS indentation rules."
   (interactive)
-  (let ((completion-ignore-case t))
-    (css-complete-symbol css-at-rule-table) ))
-
-(defun css-complete-element ()
-  "Complete the standard element at point"
-  (interactive)
-  (let ((completion-ignore-case t))
-    (css-complete-symbol css-element-table) ))
-
-(defun css-complete-property ()
-  "Complete the standard element at point"
-  (interactive)
-  (let ((completion-ignore-case t))
-    (css-complete-symbol css-property-table) ))
-
-
-(defun css-tab-function (&optional arg)
-  "Function to call when tab is pressed in CSS mode.
-
-With a prefix arg, insert a literal tab.  Otherwise behavior depends
-on the value of `css-tab-mode'.  If it's 'insert, insert a literal
-tab.  If it's 'indent, indent the current line, and if it's 'complete,
-try to complete the expression before point.  A value of 'auto means
-to inspect the current line, and indent if point is at the beginning
-or end of the line, but complete if it's at a word.
-
-There are three possible completions to perform:
-`css-complete-at-keyword' if the point is after an '@',
-`css-complete-property' if point is inside a block, and
-`css-complete-element' otherwise."
-  (interactive "P")
-  (let* ((end (point))
-         (start (prog2
-                    (beginning-of-line)
-                    (point)
-                  (goto-char end) ))
-         (prefix (buffer-substring start end)) )
-    (cond ((or arg (eq css-tab-mode 'insert))
-           (insert "\t"))
-          ((eq css-tab-mode 'indent)
-           (css-indent-line))
-          ((and (not (eq css-tab-mode 'complete))
-                (or (string-match "^[ \t]*[{}]?[ \t]*$" prefix)
-                    (string-match "^.*;[ \t]*" prefix) ))
-           ;; indent at the beginning or end of a line
-           (css-indent-line))
-          ((string-match "^.*@[a-zA-Z0-9-]*$" prefix)
-           (css-complete-at-keyword))
-          ((string-match "^\\([ \t]+.*\\|.*\{[ \t]*[a-zA-Z]+\\)$" prefix)
-           ;; complete properties on non-starting lines
-           (css-complete-property))
-          ;; otherwise try an element
-          (t (css-complete-element)) )))
-
-
-;;;###autoload
-(defun css-mode ()
-  "Major mode for editing CSS files"
-  (interactive)
-  (kill-all-local-variables)
-  (set-syntax-table css-mode-syntax-table)
-  (setq major-mode 'css-mode
-	mode-name "CSS"
-	local-abbrev-table css-mode-abbrev-table)
-  (use-local-map css-mode-map)
-  ;; local variables
-  (make-local-variable 'parse-sexp-ignore-comments)
-  (make-local-variable 'comment-start-skip)
-  (make-local-variable 'comment-start)
-  (make-local-variable 'comment-end)
-  (make-local-variable 'block-comment-start)
-  (make-local-variable 'block-comment-end)
-  (make-local-variable 'block-comment-left)
-  (make-local-variable 'block-comment-right)
-  (make-local-variable 'block-comment-top-right)
-  (make-local-variable 'block-comment-bot-left)
-  (make-local-variable 'block-comment-char)
-  (make-local-variable 'paragraph-start)
-  (make-local-variable 'paragraph-separate)
-  (make-local-variable 'paragraph-ignore-fill-prefix)
-  (make-local-variable 'font-lock-defaults)
-  (setq font-lock-defaults '((css-font-lock-keywords-1
-                              css-font-lock-keywords-2
-                              css-font-lock-keywords-3)))
-  ;; now set their values
-  (setq parse-sexp-ignore-comments t
-	comment-start-skip "/\\*+ *\\|// *"
-	comment-start "/\\*"
-	comment-end   "\\*/")
-  (setq block-comment-start     "/*"
-        block-comment-end       "*/"
-        block-comment-left      " * "
-        block-comment-right     " *"
-        block-comment-top-right ""
-        block-comment-bot-left  " "
-        block-comment-char      ?* )
-  (setq indent-line-function   'css-indent-line
-        indent-region-function 'css-indent-region
-	paragraph-ignore-fill-prefix t
-	paragraph-start (concat "\\|$" page-delimiter)
-	paragraph-separate paragraph-start)
-  (run-hooks 'css-mode-hook))
-
+  (let* ((savep (point))
+         (forward-sexp-function nil)
+	 (indent (condition-case nil
+		     (save-excursion
+		       (forward-line 0)
+		       (skip-chars-forward " \t")
+		       (if (>= (point) savep) (setq savep nil))
+		       (css-indent-calculate))
+		   (error nil))))
+    (if (not (numberp indent)) 'noindent
+      (if savep
+          (save-excursion (indent-line-to indent))
+        (indent-line-to indent)))))
 
 (provide 'css-mode)
-
-;;; css-mode.el ends here.
+;; arch-tag: b4d8b8e2-b130-4e74-b3aa-cd8f1ab659d0
+;;; css-mode.el ends here
