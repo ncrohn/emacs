@@ -31,6 +31,12 @@
 (autoload 'css-mode "css-mode" "CSS Mode." t)
 (add-to-list 'auto-mode-alist '("\\.css\\'" . css-mode))
 
+(autoload 'less-css-mode "less-css-mode" "LESS Mode." t)
+(add-to-list 'auto-mode-alist '("\\.less\\'" . less-css-mode))
+
+(autoload 'thrift-mode "thrift-mode" "Thrift Mode." t)
+(add-to-list 'auto-mode-alist '("\\.thrift\\'" . thrift-mode))
+
 (autoload 'php-mode "php-mode" "PHP Mode." t)
 (add-to-list 'auto-mode-alist '("\\.php\\'" . php-mode))
 (add-to-list 'auto-mode-alist '("\\.tpl\\'" . php-mode))
@@ -116,3 +122,5 @@
   "</html>")
 
 (define-auto-insert "\\.html\\'" 'xhtml1t-throwaway)
+
+;; (load "~/.emacs.d/floobits/floobits.el")
